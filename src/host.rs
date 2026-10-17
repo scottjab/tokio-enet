@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::Error;
@@ -11,7 +12,7 @@ use crate::protocol::codec;
 use crate::protocol::commands::Command;
 use crate::protocol::header::{CommandHeader, ProtocolHeader};
 use crate::protocol::{self, COMMAND_FLAG_ACKNOWLEDGE};
-use crate::socket::EnetSocket;
+use crate::socket::{EnetSocket, UdpSocketImpl};
 use crate::time;
 
 // Host constants matching C ENet.
@@ -37,10 +38,16 @@ pub enum Event {
 }
 
 /// Configuration for creating a host.
-#[derive(Debug)]
 pub struct HostConfig {
     /// Address to bind to. `None` for client-only hosts (uses ephemeral port).
+    ///
+    /// Ignored when [`HostConfig::socket`] is set.
     pub address: Option<SocketAddr>,
+    /// Use an existing socket instead of binding a new OS socket.
+    ///
+    /// When set, [`HostConfig::address`] is ignored and the host sends and
+    /// receives through the provided socket implementation.
+    pub socket: Option<Arc<dyn UdpSocketImpl>>,
     /// Maximum number of peers. Default: 1.
     pub peer_count: usize,
     /// Maximum channels per peer. Default: 1.
@@ -51,10 +58,24 @@ pub struct HostConfig {
     pub outgoing_bandwidth: u32,
 }
 
+impl std::fmt::Debug for HostConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostConfig")
+            .field("address", &self.address)
+            .field("socket", &self.socket.as_ref().map(|_| "<custom>"))
+            .field("peer_count", &self.peer_count)
+            .field("channel_limit", &self.channel_limit)
+            .field("incoming_bandwidth", &self.incoming_bandwidth)
+            .field("outgoing_bandwidth", &self.outgoing_bandwidth)
+            .finish()
+    }
+}
+
 impl Default for HostConfig {
     fn default() -> Self {
         Self {
             address: None,
+            socket: None,
             peer_count: 1,
             channel_limit: 1,
             incoming_bandwidth: 0,
@@ -115,10 +136,15 @@ impl Host {
             protocol::PROTOCOL_MAXIMUM_CHANNEL_COUNT,
         );
 
-        let bind_addr = config
-            .address
-            .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
-        let socket = EnetSocket::bind(bind_addr)?;
+        let socket = match config.socket {
+            Some(socket) => EnetSocket::from_socket(socket),
+            None => {
+                let bind_addr = config
+                    .address
+                    .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+                EnetSocket::bind(bind_addr)?
+            }
+        };
 
         let local_addr = socket.local_addr()?;
         tracing::info!(%local_addr, peer_count, channel_limit, "ENet host created");

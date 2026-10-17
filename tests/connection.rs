@@ -191,3 +191,46 @@ async fn disconnect_event() {
         "expected Disconnect event with data=99, got {event:?}"
     );
 }
+
+/// Test that a host built from an injected socket talks to a natively bound host.
+#[tokio::test]
+async fn injected_socket_roundtrip() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("tokio_enet=trace")
+        .try_init();
+
+    // Server uses an injected tokio socket instead of binding one itself.
+    let injected = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = injected.local_addr().unwrap();
+    let server_config = HostConfig {
+        socket: Some(std::sync::Arc::new(injected)),
+        peer_count: 4,
+        channel_limit: 2,
+        ..Default::default()
+    };
+    let mut server = Host::new(server_config).unwrap();
+    assert_eq!(server.local_addr().unwrap(), server_addr);
+
+    // Client binds normally.
+    let client_config = HostConfig {
+        peer_count: 1,
+        channel_limit: 2,
+        ..Default::default()
+    };
+    let mut client = Host::new(client_config).unwrap();
+
+    let peer_id = client.connect(server_addr, 2, 7).unwrap();
+    client.flush().await.unwrap();
+
+    poll_expect_none(&mut server, Duration::from_millis(200)).await;
+
+    let event = poll_until(&mut client, |e| matches!(e, Event::Connect { .. })).await;
+    assert!(
+        matches!(&event, Some(Event::Connect { peer_id: id, .. }) if *id == peer_id),
+        "expected Connect event for peer {peer_id}, got {event:?}"
+    );
+    client.flush().await.unwrap();
+
+    let event = poll_until(&mut server, |e| matches!(e, Event::Connect { .. })).await;
+    assert!(event.is_some(), "expected Connect event on server");
+}

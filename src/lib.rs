@@ -64,3 +64,4 @@ pub use error::Error;
 pub use host::{Event, Host, HostConfig};
 pub use packet::{Packet, PacketMode};
 pub use peer::{PeerId, PeerState};
+pub use socket::UdpSocketImpl;

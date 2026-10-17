@@ -1,10 +1,46 @@
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use crate::Error;
 
-/// Wrapper around a tokio UDP socket, created with SOCK_CLOEXEC and appropriate buffer sizes.
+type SendToFuture<'a> = Pin<Box<dyn Future<Output = std::io::Result<usize>> + Send + 'a>>;
+type RecvFromFuture<'a> =
+    Pin<Box<dyn Future<Output = std::io::Result<(usize, SocketAddr)>> + Send + 'a>>;
+
+/// A UDP socket usable by an ENet [`Host`](crate::Host).
+///
+/// Implemented for [`tokio::net::UdpSocket`]. Implement this trait to run ENet
+/// over a custom transport, such as a userspace network stack.
+pub trait UdpSocketImpl: Send + Sync + 'static {
+    /// Send data to the given address.
+    fn send_to<'a>(&'a self, buf: &'a [u8], addr: SocketAddr) -> SendToFuture<'a>;
+
+    /// Receive data and the sender's address.
+    fn recv_from<'a>(&'a self, buf: &'a mut [u8]) -> RecvFromFuture<'a>;
+
+    /// Get the local address this socket is bound to.
+    fn local_addr(&self) -> std::io::Result<SocketAddr>;
+}
+
+impl UdpSocketImpl for tokio::net::UdpSocket {
+    fn send_to<'a>(&'a self, buf: &'a [u8], addr: SocketAddr) -> SendToFuture<'a> {
+        Box::pin(tokio::net::UdpSocket::send_to(self, buf, addr))
+    }
+
+    fn recv_from<'a>(&'a self, buf: &'a mut [u8]) -> RecvFromFuture<'a> {
+        Box::pin(tokio::net::UdpSocket::recv_from(self, buf))
+    }
+
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        tokio::net::UdpSocket::local_addr(self)
+    }
+}
+
+/// Wrapper around a UDP socket, created with SOCK_CLOEXEC and appropriate buffer sizes.
 pub struct EnetSocket {
-    inner: tokio::net::UdpSocket,
+    inner: Arc<dyn UdpSocketImpl>,
 }
 
 const RECEIVE_BUFFER_SIZE: usize = 256 * 1024;
@@ -32,8 +68,13 @@ impl EnetSocket {
         let std_socket: std::net::UdpSocket = socket.into();
         let tokio_socket = tokio::net::UdpSocket::from_std(std_socket)?;
         Ok(Self {
-            inner: tokio_socket,
+            inner: Arc::new(tokio_socket),
         })
+    }
+
+    /// Wrap an existing socket implementation instead of binding a new OS socket.
+    pub fn from_socket(socket: Arc<dyn UdpSocketImpl>) -> Self {
+        Self { inner: socket }
     }
 
     /// Send data to the given address.
